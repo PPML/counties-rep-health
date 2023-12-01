@@ -1,0 +1,173 @@
+---
+title: "methods_group3.RmD"
+output:
+  word_document: default
+  html_document: default
+date: "2023-03-21"
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(irr)
+library(parallel)
+library(ranger)
+library(glmnet)
+library(rsample)
+library(purrr)
+
+
+#Functions
+source("model_functions.R")
+
+#Filepaths
+
+in.path = "~/data_counties/Data/Processed/"
+out.path = "~/counties-project/Results/yrbs_impute_model/"
+
+yrbs = readRDS(paste0("~/data_counties/Data/Raw/YRBS_Raw_final.RDS"))
+load(paste0(in.path,"state_prediction.RData"))
+
+get_2018 = subset_dt[year %in% c(2017, 2019),.(year,sitecode, age,sex, grade,hadsex = as.numeric(as.character(q58)), weight)]
+check_stats = data.table(table(get_2018$sitecode, get_2018$year))
+no_2017  = check_stats[V2 == 2017 & N == 0, unique(V1)]
+
+results = readRDS(paste0(out.path,"/090623_prediction_results.RDS"))
+##NOTE: UPDATE UNCERTAINTY PATH ONCE COMPLETE
+uncertainty = readRDS(paste0(out.path,"/090623_uncertainty.RDS")) 
+
+lower1 = apply(uncertainty[,5:ncol(uncertainty)],1,function(x) quantile(x,0.025))
+upper1 = apply(uncertainty[,5:ncol(uncertainty)],1,function(x) quantile(x,0.975))
+results[,lower := lower1]
+results[,upper := upper1]
+
+```
+
+## Group 3: Imputation approach
+
+### Model Description
+
+`r nrow(pred_mat[method == "impute"])` states (`r toString(pred_mat[method == "impute",sitecode])`) did not have a publicly available YRBS available. In these states the approach depended on the available information.
+
+#### 1. Washington
+
+The Washington Healthy Youth Survey (1) estimated the proportion of male and female adolescents in grades 10 and 12 who had ever had sex in the year 2018 (Table 1). However we required estimates by sex and age for 2019. We derived the these as such:
+
+1\. Estimated the 2018 value for state-level proportion of respondents who ever had sex, using a linear interpolation of the 2017 and 2019 YRBS values. The data were aggregated to the state level, such that we had one outcome per age-sex-grade combination in each state (Figure 1). `r nrow(no_2017)` did not have 2017 data available on the proportion who ever had sex (`r toString(no_2017)`) and thus were excluded from the analysis for Washington State. They were still used in the main analysis and for Oregon and Minnesota estimation below, however, due to available 2019 outcome data. 
+
+2\. Used a linear model with predictors including the 2018 proportions estimated above for grades 10 and 12, sex and age,  and a random intercept for state (Equation 1). The outcome was the aggregate proportion of respondents who had ever had sex in 2019. 
+
+3\. The model in the above step was used to predict the 2019 proportion by age, using the grades 10 and 12 sex-specific proportions from Washington state.
+
+
+Equation (1)\
+$$
+E(w) = (\beta_0 + u_s) +\beta_1*age  +\beta_2*g10 + \beta_3*g12 + \beta_4*sex 
+$$
+Where
+
+w = 2019 proportion who ever had sex
+
+g10 = 2018 proportion ever had sex in grade 10
+
+g12 = 2018 proportion ever had sex in grade 12
+
+sex = indicator variable for sex male or female
+
+s = state
+
+#### 2. Minnesota and Oregon
+
+The 2019 Minnesota Student Survey (2) and the 2019 Oregon Healthy Teens (3) survey asked respondents whether they had ever had sex. The information was available in grades 9 and 11 for Minnesota and grade 11 only for Oregon (Table 1) To estimate the proportions for each of these states by age, we:
+
+1.\. Used a linear model with predictors including the 2019 age-specific proportions estimated in above for grades 11 (Oregon) or grades 9 and 11 (Minnesota), sex and a random intercept for state allowing each state to have its own intercept (Equation 2). The outcome was the aggregate proportion of respondents who had ever had sex in 2019. 
+
+3\. The model in the above step was used to predict the 2019 proportion by age, using the available grade- sex-specific proportions from Minnesota and Oregon
+
+```{r table_1}
+wa = data.table(state = "WA",
+                grade = c(10,12,10,12),
+                sex = c("male","male","female","female"),
+                hadsex = c(0.281,0.491,0.238,0.458),
+                year = 2018)
+or = data.table(state= "OR",
+                grade = 11,
+                sex = c("female","male"),
+                hadsex = c(0.422,0.395),
+                year = 2019)
+mn = data.table(state = "MN",
+                grade = c(9,11,9,11),
+                sex = c("female", "female","male","male"),
+                hadsex = c(0.1,0.34,0.14,0.35),
+                year  = 2019)
+
+knitr::kable(rbind(or,mn,wa),caption="Table 2: Proportion of respondents who reported they ever had sex from Oregon Healthy Teens survey, the Minnesota Student Survey and the Washington Healthy Youth Survey")
+
+```
+
+
+Equation (2)\
+
+$$
+E(w) = (\beta_0 + u_s) +\beta_1*age  +\beta_2*g9 + \beta_3*g11 + \beta_4*sex 
+$$
+
+Where
+
+w = 2019 proportion who ever had sex
+
+g9 = 2019 proportion ever had sex in grade 9 (Minnesota only)
+
+g11 = 2019 proportion ever had sex in grade 11
+
+sex = indicator variable for sex male or female
+
+##### Uncertainty
+
+We derived uncertainty by: 1. generating 100 bootstrap resamples of the YRBS data 2. for each bootstrap resample, running the models in Equation (1) and Equation (2): (a) Take 100 draws from a multivariate normal distribution with variance equal to the fixed effects’ variance of the coefficients. The coefficient draw was used to generate a set of random predictions for each state. (b) Take 100 draws from a normal distribution, centered at zero with variance equal to the variance of the residuals of the random intercepts. These draws were added to the state predictions from 2a for the final 10,000 predictions.The result was 100x100 predictions for each of the seven states. The 2.5th and 97.5th percentiles of the distribution of predictions formed the uncertainty interval bounds. 
+
+### Results - TO BE UPDATED ONCE UNCERTAINTY IS COMPLETE
+
+The linear interpolation results for the 2018 values required for Washington estimation are displayed in Figure 1. Full results are in Table 5.
+
+Figure 1: Interpolation results for 'hadsex' outcome variable for 30 states with 2017 and 2019 YRBS data [Insert interpolated values plot] - 
+
+```{r table2}
+# ggplot(results, aes(state, yrbs_state, col = sex)) + geom_point() + geom_errorbar(aes(ymin = lower, ymax = upper, x = state)) + facet_wrap(~age)
+table2 = results[,.(state, 
+                    age, 
+                    sex, hadsex = paste0(round(yrbs_state,2)," (", round(lower,2),";", round(upper,2),")"))]
+knitr::kable(table2,caption="Table 5: Estimated proportion who hever had sex by age and sex for Washington, Oregon and Minnesota")
+```
+
+
+References
+
+1.  ***Healthy Youth Survey*** 2018 Analyzer Report ***Washington*** State Health Care Authority, Department of. Health, Office of the Superintendent of Public Instruction, and Liquor and Cannabis Board. <https://www.askhys.net/>. Accessed March 27, 2023.
+
+2. 2019 Oregon Healthy Teens, State of Oregon Report, Oregon Health Authority, Public Health Division. 
+
+3. 2019 Minnesota Student Survey, Statewide Tables Table 47a.  Minnesota Departments of Education, Health, Human Services and Public Safety.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

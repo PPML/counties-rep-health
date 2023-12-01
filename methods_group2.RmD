@@ -1,0 +1,120 @@
+---
+title: "methods_group2"
+output:
+  word_document: default
+  html_document: default
+date: "2023-02-07"
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(lme4)
+library(irr)
+library(parallel)
+library(ranger)
+library(glmnet)
+library(rsample)
+library(purrr)
+library(openxlsx)
+
+
+#Functions
+source("model_functions.R")
+
+#Filepaths
+
+in.path = "~/data_counties/Data/Processed/"
+out.path = "~/counties-project/Results/yrbs_pred_model/"
+
+yrbs = readRDS(paste0("~/data_counties/Data/Raw/YRBS_Raw_final.RDS"))
+load(paste0(in.path,"state_prediction.RData"))
+
+```
+
+## Group 2: Prediction model
+
+# Model Description
+`r nrow(pred_mat[method == "predict"])` states (`r toString(pred_mat[method == "predict",sitecode])`) had 2019 YRBS available but did not ask respondents whether they ever had sex. The 122 predictors in Table 1 were used to test a random forest algorithm and Least Absolute Shrinkage and Selection Operator (LASSO) regression models in the 36 states that had asked the "ever had sex" question in their 2019 YRBS. For each variable, we substituted the mode of the non-missing values when there were missing observations and created a binary missing variable indicator allowing missingness to act as an independent predictor of the outcome (ever had sex).
+
+```{r table_1}
+out_dat = dat_setup(vs = all_pred_new, pred_mat)
+year_sub = 2019 #Optional subset year
+#sx_dt = rbind(subset_dt, predict_dt)
+sx_dt = subset_dt
+sx_dt = sx_dt[age %in% c(4,5,6,7)]
+
+varimp_inds = as.data.table(read.xlsx(paste0('~/data_counties/colname_mapping_2019.xlsx')))
+
+preds = intersect(varimp_inds[pred == "y" & !is.na(var), var], colnames(sx_dt))
+preds = intersect(varimp_inds[is.na(dep_sub_q) | dep_sub_q == 1, var], preds)
+sx_dt = sx_dt[year == year_sub]
+sx_dt = sx_dt[!is.na(q58)]
+
+#Create prediction data
+#Predict out states with missing 2019
+predict_states = pred_mat[method == "predict"]
+dt_pred = predict_dt[sitecode %in% predict_states$sitecode & year == 2019]
+dt_pred = dt_pred[age %in% c(4,5,6,7)]
+
+#Identify variables with all or a lot of missing data (i.e. question not available that year)
+all_missing_vars = c()
+high_missing_vars = c()
+cutoff = nrow(sx_dt)*0.2
+for(var1 in preds){
+  num = nrow(sx_dt[is.na(sx_dt[[var1]])])
+  if(num == nrow(sx_dt)) all_missing_vars = c(all_missing_vars, var1)
+  if(num > cutoff) high_missing_vars = c(high_missing_vars, var1)
+}
+
+all_vars = intersect(colnames(sx_dt)[!colnames(sx_dt) %in% c(all_missing_vars)],colnames(sx_dt))
+sx_dt = sx_dt[, ..all_vars]
+dt_pred = dt_pred[, ..all_vars]
+
+var_names = varimp_inds[var %in% all_vars, c("var","Q")]
+
+knitr::kable(var_names,caption="Table 1: Variables included in training prediction model to predict answer to ever had sex")
+
+```
+
+The LASSO regression model was implemented using the glmnet package in R (1). Within this model, we used mean square error to compare candidates. The random forest model was implemented using the Ranger package in R (2). We compared a  version that allowed the model to split at any variable using the lowest variance at each node, as well as a version where it was forced to split on key variables age and sex. The final predictions were an ensemble of the trees’ predictions. The models were validated using a 'leave-one-out' approach. We excluded one of 36 states and ran the model on the remaining 35 states. The model was used to predict the outcome for the state that was left out. This process was repeated 36 times until we had a set of predictions for every state. Evaluating the intraclass correlation coefficients and the mean absolute error between predictions and observations enabled choosing a final model. 
+
+# Uncertainty
+
+Uncertainty for the predictions was estimated through bootstraps of the YRBS data in the 36 states used to run the predictive model, as well as the four states for which we generated predictions. For each of 100 bootstrap re-samples of the original data, we re-ran the final predictive model to generate 100 corresponding sets of predictions for each state. The 2.5th and 97.5th percentile of the 100 predictions formed the bounds of the uncertainty interval.
+
+# Results
+
+The LASSO regression model out-performed the random forest models in most strata (Figure 1 and 2). Predictions for the four states were thus derived using the LASSO and are available in Table 2. 
+
+Figure 1
+[Insert figure with ICCs]
+
+Figure 2
+[MAE figure]
+
+
+```{r table_2}
+predictions = readRDS(paste0(out.path,"/090623_prediction_results.RDS") )
+uncertainty = readRDS(paste0(out.path,"/090623_uncertainty.RDS"))
+uncertainty[,c("lower","upper") := .(quantile(yrbs_state, 0.025), quantile(yrbs_state,0.975)), by = c("state","age","sex")]
+final_out = unique(merge(predictions, uncertainty, by = c("state","age","sex"))[,.(state,age,sex,prediction = yrbs_state.x, lower, upper)])
+final_out[,estimate := paste0(round(prediction,2)," (",round(lower,2),",",round(upper,2),")")]
+final_out[,c("prediction","lower","upper","uncertainty") := NULL]
+
+knitr::kable(final_out,caption="Table 2: Estimated proportion who ever had sex for GA, LA, UT, VT")
+
+```
+
+1. Friedman J, Hastie T, Tibshirani R (2010). “Regularization Paths for Generalized Linear Models via Coordinate Descent.” Journal of Statistical Software, 33(1), 1–22. doi:10.18637/jss.v033.i01, https://www.jstatsoft.org/v33/i01/.
+2. Wright MN, Ziegler A (2017). “ranger: A Fast Implementation of Random Forests for High Dimensional Data in C++ and R.” Journal of Statistical Software, 77(1), 1–17. doi:10.18637/jss.v077.i01.
+
+
+

@@ -1,0 +1,133 @@
+---
+title: "Methods Appendix"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+date: "2023-02-06"
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+knitr::opts_chunk$set(echo = FALSE)
+library(data.table)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(irr)
+library(MASS)
+library(lme4)
+library(sjPlot)
+
+#Functions
+source("model_functions.R")
+
+#Filepaths
+in.path = "~/data_counties/Data/Processed/"
+out.path = "~/counties-project/Results/"
+
+yrbs = readRDS(paste0(in.path,"YRBS_final.RDS"))
+load(paste0(in.path,"state_prediction.RData"))
+
+```
+
+## Group 1: Extrapolation model
+
+Seven states (Delaware, Hawaii, Indiana, New Jersey, New Mexico, Tennessee and Wyoming) had asked whether a respondent had ever had sex in previous years at least since 2010. For these states, we estimated the 2019 value by determining the association between previous years of data and the 2019 value. The data across the 35 states with available information were aggregated prior to modelling: we took the average proportion reporting having had sex, weighted by the survey sampling weights.
+
+```{r aggregation,echo = FALSE}
+all_pred_new[, Y := factor(q58, levels = c(1,2), labels = c(1,0))]   # Change Y to factor
+all_pred_new[, Y := factor(Y, levels = c(0,1))]  # Ensure 0 is the reference category
+all_pred_new[, hadsex := as.numeric(as.character(Y))]
+agg_dat = all_pred_new[sitecode %in% pred_mat[method == "direct",sitecode] & year > 2009 & age %in% c(4:7) & include1 == 1]
+agg_dat = agg_dat[,.(mean_prop = weighted.mean(hadsex, weight, na.rm=TRUE)),
+                  by = c("age","sex","sitecode","year")]
+agg_dat = agg_dat[!is.na(sex) & !is.na(age)]
+agg_dat = data.table::dcast(agg_dat,  age + sex + sitecode ~ year, 
+                            value.var = "mean_prop")
+setnames(agg_dat, c("2011","2013","2015","2017","2019"),c("v2011","v2013","v2015","v2017","v2019"))
+agg_dat = agg_dat[!sitecode == "VA"]
+
+pred_dat = all_pred_new[sitecode %in% pred_mat[method == "extrapolate",sitecode] & year > 2009 & age %in% c(4:7)]
+pred_dat = pred_dat[,.(mean_prop = weighted.mean(hadsex, weight, na.rm=TRUE)),
+                  by = c("age","sex","sitecode","year")]
+pred_dat = pred_dat[!is.na(sex) & !is.na(age)]
+pred_dat = data.table::dcast(pred_dat,  age + sex + sitecode ~ year, value.var = "mean_prop")
+setnames(pred_dat, c("2011","2013","2015","2017","2019"),c("v2011","v2013","v2015","v2017","v2019"))
+
+```
+
+The states with missing data had five patterns of previous year availability (Table 1). Thus, five models of this form were used which each included the set of states that had the same years of data available.
+
+```{r extrapolation,echo = FALSE}
+
+#ID missing patterns 
+dat_2011 = all_pred_new[year == 2011 & include1 == 1 & sitecode %in% pred_mat[method == "direct",sitecode], unique(sitecode)]
+dat_2013 = all_pred_new[year == 2013 & include1 == 1 & sitecode %in% pred_mat[method == "direct",sitecode], unique(sitecode)]
+dat_2015 = all_pred_new[year == 2015 & include1 == 1 & sitecode %in% pred_mat[method == "direct",sitecode], unique(sitecode)]
+dat_2017 = all_pred_new[year == 2017 & include1 == 1 & sitecode %in% pred_mat[method == "direct",sitecode], unique(sitecode)]
+availability = data.table(expand.grid(v2011 = 0, v2013 = 0, v2015 = 0, v2017 = 0, sitecode = pred_mat[method == "direct",sitecode]))
+availability[sitecode %in% dat_2011, v2011 := 1]                                                         
+availability[sitecode %in% dat_2013, v2013 := 1]           
+availability[sitecode %in% dat_2015, v2015 := 1]           
+availability[sitecode %in% dat_2017, v2017 := 1]
+
+extrap_patterns = all_pred_new[sitecode %in% pred_mat[method == "extrapolate",sitecode] & year > 2009 & age %in% c(4:7) & include1 == 1,.(sitecode, year)]
+extrap_patterns = unique(extrap_patterns[,available := 1] )
+extrap_patterns = data.table::dcast(extrap_patterns, sitecode ~ year, value.var = "available")
+colnames(extrap_patterns) = c("sitecode","v2011","v2013", "v2015", "v2017")
+extrap_patterns[sitecode %in% c("DE"), pattern := 1]
+extrap_patterns[sitecode %in% c("HI","NJ","TN"), pattern := 2]
+extrap_patterns[sitecode %in% c("NM"), pattern := 3]
+extrap_patterns[sitecode %in% c("WY"), pattern := 4]
+extrap_patterns[sitecode %in% c("IN"), pattern := 5]
+
+group1 = availability[v2011 == 1 & v2013 == 1 & v2015 == 1 & v2017 == 1, unique(sitecode)]
+group2 = availability[v2011 == 1 & v2013 == 1, unique(sitecode)]
+group3 = availability[v2015 == 1 & v2017 == 1, unique(sitecode)]
+group4 = availability[v2011 == 1 & v2013 == 1 & v2015 == 1, unique(sitecode)]
+group5 = availability[v2015 == 1, unique(sitecode)]
+
+extrap_patterns[,num_states_model := 0]
+extrap_patterns[pattern == 1,num_states_model := length(group1)]
+extrap_patterns[pattern == 2,num_states_model := length(group2)]
+extrap_patterns[pattern == 3,num_states_model := length(group3)]
+extrap_patterns[pattern == 4,num_states_model := length(group4)]
+extrap_patterns[pattern == 5,num_states_model := length(group5)]
+
+all_groups = list(group1 = group1, group2 = group2,
+                  group3 = group3, group4 = group4, group5 = group5)
+
+agg_dat[,age := factor(age, levels = c(4,5,6,7))]
+predictors = list(pattern1 = c("v2011 + v2013 + v2015 + v2017"),
+                  pattern2 = c("v2011 + v2013"),
+                  pattern3 = c("v2015 + v2017"),
+                  pattern4 = c("v2011 + v2013 + v2015"),
+                  pattern5 = c("v2015"))
+
+knitr::kable(extrap_patterns, caption="Table 1: Historical missingness patterns of seven states without a 2019 data available for 'ever had sex")
+
+```
+
+In these models, the 2019 proportion of respondents reporting having had sex was the outcome, while the value in the other years were included as indicator variables along with age and sex.  A random intercept for state allowed variation at this level as well (Equation 1).Including age and sex interactions did not substantially improve the model fit based in the intraclass correlation coefficient between the observed and predicted values (results not shown) [Note: "~/counties-project/Results/group1_extrap_ICC.pdf and group1_all_ICCs.csv]. 
+
+(1)
+$$
+w_{ij2019} = (\beta_{i0} + u_j) +  \sum_{n=1}^{n=k} \beta_k*w_{ik}  + \beta_{1}*age_{ij} + \beta_{2}*sex_{ij} + \epsilon_{i} 
+$$
+
+where k represents the number of years of data in the missingness pattern, and j is the state and i is an observation within a state. 
+
+###Uncertainty
+We derived uncertainty by :
+1. generating 100 bootstrap resamples of the YRBS data
+2. for each bootstrap resample, running the model in Equation (1):
+  (a) Take 100 draws from a multivariate normal distribution with variance equal to the fixed effects' variance of the coefficients. The coefficient draw was used to generate a set of random predictions for each state.
+  (b) Take 100 draws from a normal distribution, centered at zero with variance equal to the variance of the residuals of the random intercepts. These draws were added to the state predictions from 2a for the final 10,000 predictions.
+
+The result was 100x100 predictions for each of the seven states. The 2.5th and 97.5th percentiles of the distribution of predictions formed the uncertainty interval bounds. The resulting distributions were similar to those of the empirical data (Figures 1-5)
+
+
